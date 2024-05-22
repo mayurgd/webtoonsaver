@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import asyncio
 import aiohttp
 import requests
@@ -8,6 +9,7 @@ import multiprocess as mp
 from shutil import rmtree
 from slugify import slugify
 from bs4 import BeautifulSoup
+from selenium import webdriver
 from PIL import Image, ImageFile
 from collections import OrderedDict
 from aiofiles import open as aio_open
@@ -54,6 +56,14 @@ class WebtoonSaver:
                 "chapter_class": "a-h wleft",
                 "image_class": re.compile(r"loading p\d+"),
             }
+        elif "toongod.org" in url:
+            url = url + "/"
+            self.database = {
+                "chapter_class": "wp-manga-chapter",
+                "image_class": {
+                    "class": "wp-manga-chapter-img img-responsive effect-fade lazyloaded"
+                },
+            }
 
         self.url = url
         if name is not None:
@@ -85,19 +95,31 @@ class WebtoonSaver:
         Returns:
             OrderedDict: A dictionary where keys are chapter IDs and values are chapter URLs.
         """
-        r = requests.get(self.url)
-        soup = BeautifulSoup(r.text, "html.parser")
+        if "toongod.org" in self.url:
+            browser = webdriver.Firefox()
+            browser.get(self.url)
+            time.sleep(5)
+            soup = BeautifulSoup(browser.page_source, "html.parser")
+            browser.close()
+        else:
+            r = requests.get(self.url)
+            soup = BeautifulSoup(r.text, "html.parser")
+
         self.chapter_urls = OrderedDict()
 
         for chapter_element in soup.findAll(
             "li", {"class": self.database["chapter_class"]}
         ):
             chapter_url = chapter_element.find("a")["href"]
-            chapter_id = re.findall(r"\d+", chapter_url)[0]
             if "webtoonscan.com" in self.url:
+                chapter_id = re.findall(r"\d+", chapter_url)[0]
                 self.chapter_urls[chapter_id] = chapter_url
             elif "manhwa18.cc" in self.url:
+                chapter_id = re.findall(r"\d+", chapter_url)[0]
                 self.chapter_urls[chapter_id] = self.url.rsplit("/", 3)[0] + chapter_url
+            elif "toongod.org" in self.url:
+                chapter_id = re.findall(r"\d+", chapter_url.rsplit("/", 2)[1])[0]
+                self.chapter_urls[chapter_id] = chapter_url
 
         # Print the chapters that weren't parsed
         last_chapter = int(list(self.chapter_urls.keys())[0])
@@ -207,11 +229,18 @@ class WebtoonSaver:
                 rmtree(image_save_path)
             os.mkdir(image_save_path)
 
-            r = requests.get(chapter_url)
-            soup = BeautifulSoup(r.text, "html.parser")
+            if "toongod.org" in chapter_url:
+                browser = webdriver.Firefox()
+                browser.get(chapter_url)
+                time.sleep(5)
+                soup = BeautifulSoup(browser.page_source, "html.parser")
+                browser.close()
+            else:
+                r = requests.get(chapter_url)
+                soup = BeautifulSoup(r.text, "html.parser")
 
             images = soup.findAll("img", {"class": self.database["image_class"]})
-            image_urls = [re.sub("\s+", "", i["src"]) for i in images]
+            image_urls = [re.sub("\s+", "", i["data-src"]) for i in images]
 
             downloaded_indexes = await self.download_images(image_urls, image_save_path)
 
@@ -269,6 +298,7 @@ class WebtoonSaver:
 
 def run_webtoonsaver(
     url: str,
+    name: str | None = None,
     num_chapters: int | None = None,
     chapter_range: dict | None = {"start": None, "end": None},
     n_workers: int = -1,
@@ -278,6 +308,7 @@ def run_webtoonsaver(
 
     Args:
         url (str): The URL of the comic.
+        name (str, optional): The name of the comic.
         num_chapters (int, optional): The number of chapters to download. Overrides chapter_range if provided.
         chapter_range (dict, optional): A dictionary with 'start' and 'end' keys to specify the range of chapters to download. Defaults to {"start": None, "end": None}.
         n_workers (int, optional): The number of worker processes to use. Defaults to -1, which sets the number of workers to the number of available CPU cores.
@@ -286,7 +317,7 @@ def run_webtoonsaver(
         None
     """
     comic_obj = WebtoonSaver(
-        url=url, num_chapters=num_chapters, chapter_range=chapter_range
+        url=url, name=name, num_chapters=num_chapters, chapter_range=chapter_range
     )
     comic_obj.getChapterURLs()
     chapter_urls = list(comic_obj.chapter_urls.items())
